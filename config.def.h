@@ -8,15 +8,21 @@ static const float focuscolor[]            = {1.0, 0.0, 0.0, 1.0};
 /* To conform the xdg-protocol, set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.1, 0.1, 0.1, 1.0};
 
+/* Autostart */
+static const char *const autostart[] = {
+        "wbg", "/path/to/your/image", NULL,
+        NULL /* terminate */
+};
+
 /* tagging */
 static const char *tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
 static const Rule rules[] = {
-	/* app_id     title       tags mask     isfloating   monitor */
+	/* app_id     title       tags mask     isfloating  isterm  noswallow  monitor */
 	/* examples:
-	{ "Gimp",     NULL,       0,            1,           -1 },
+	{ "Gimp",     NULL,       0,            1,          0,      1,         -1 },
 	*/
-	{ "firefox",  NULL,       1 << 8,       0,           -1 },
+	{ "firefox",  NULL,       1 << 8,       0,          0,      1,         -1 },
 };
 
 /* layout(s) */
@@ -110,6 +116,9 @@ static const char *menucmd[] = { "bemenu-run", NULL };
 static const Key keys[] = {
 	/* Note that Shift changes certain key codes: c -> C, 2 -> at, etc. */
 	/* modifier                  key                 function        argument */
+
+	{ MODKEY|WLR_MODIFIER_SHIFT|WLR_MODIFIER_CTRL, XKB_KEY_M,        restartdwl,     {0} },
+
 	{ MODKEY,                    XKB_KEY_p,          spawn,          {.v = menucmd} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
 	{ MODKEY,                    XKB_KEY_j,          focusstack,     {.i = +1} },
