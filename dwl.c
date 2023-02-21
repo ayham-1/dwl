@@ -113,6 +113,7 @@ typedef struct {
 	const Arg arg;
 } Button;
 
+typedef struct Pertag Pertag;
 typedef struct Monitor Monitor;
 typedef struct Client Client;
 struct Client {
@@ -207,6 +208,7 @@ struct Monitor {
 	struct wlr_box w;         /* window area, layout-relative */
 	struct wl_list layers[4]; /* LayerSurface::link */
 	const Layout *lt[2];
+	Pertag *pertag;
 	unsigned int seltags;
 	unsigned int sellt;
 	unsigned int tagset[2];
@@ -446,6 +448,15 @@ static Atom netatom[NetLast];
 
 /* attempt to encapsulate suck into one file */
 #include "client.h"
+
+struct Pertag {
+	unsigned int curtag, prevtag;   /* current and previous tag */
+	int nmasters[LENGTH(tags) + 1]; /* number of windows in master area */
+	float mfacts[LENGTH(tags) + 1]; /* mfacts per tag */
+	unsigned int sellts[LENGTH(tags) + 1]; /* selected layouts */
+	const Layout
+	    *ltidxs[LENGTH(tags) + 1][2]; /* matrix of tags and layouts indexes  */
+};
 
 /* compile-time check if all tags fit into an unsigned int bit array. */
 struct NumTags {
@@ -947,7 +958,8 @@ void createmon(struct wl_listener *listener, void *data) {
 	struct wlr_output *wlr_output = data;
 	const MonitorRule *r;
 	size_t i;
-	Monitor *m = wlr_output->data = ecalloc(1, sizeof(*m));
+	Monitor *om, *m = wlr_output->data = ecalloc(1, sizeof(*m));
+	int max_x = 0, max_x_y = 0, width, height;
 	m->wlr_output = wlr_output;
 
 	wlr_output_init_render(wlr_output, alloc, drw);
@@ -989,8 +1001,28 @@ void createmon(struct wl_listener *listener, void *data) {
 	wlr_output_enable_adaptive_sync(wlr_output, 1);
 	wlr_output_commit(wlr_output);
 
+	wl_list_for_each(om, &mons, link) {
+		wlr_output_effective_resolution(om->wlr_output, &width, &height);
+		if (om->m.x + width > max_x) {
+			max_x = om->m.x + width;
+			max_x_y = om->m.y;
+		}
+	}
+
 	wl_list_insert(&mons, &m->link);
 	printstatus();
+
+	m->pertag = calloc(1, sizeof(Pertag));
+	m->pertag->curtag = m->pertag->prevtag = 1;
+
+	for (i = 0; i <= LENGTH(tags); i++) {
+		m->pertag->nmasters[i] = m->nmaster;
+		m->pertag->mfacts[i] = m->mfact;
+
+		m->pertag->ltidxs[i][0] = m->lt[0];
+		m->pertag->ltidxs[i][1] = m->lt[1];
+		m->pertag->sellts[i] = m->sellt;
+	}
 
 	/* The xdg-protocol specifies:
 	 *
@@ -1013,7 +1045,7 @@ void createmon(struct wl_listener *listener, void *data) {
 	 */
 	m->scene_output = wlr_scene_output_create(scene, wlr_output);
 	if (m->m.x < 0 || m->m.y < 0)
-		wlr_output_layout_add_auto(output_layout, wlr_output);
+		wlr_output_layout_add(output_layout, wlr_output, max_x, max_x_y);
 	else
 		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
 }
@@ -1409,7 +1441,8 @@ void swallow(Client *c, Client *w) {
 void incnmaster(const Arg *arg) {
 	if (!arg || !selmon)
 		return;
-	selmon->nmaster = MAX(selmon->nmaster + arg->i, 0);
+	selmon->nmaster = selmon->pertag->nmasters[selmon->pertag->curtag] =
+	    MAX(selmon->nmaster + arg->i, 0);
 	arrange(selmon);
 }
 
@@ -2112,9 +2145,11 @@ void setlayout(const Arg *arg) {
 	if (!selmon)
 		return;
 	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
-		selmon->sellt ^= 1;
+		selmon->sellt = selmon->pertag->sellts[selmon->pertag->curtag] ^= 1;
 	if (arg && arg->v)
-		selmon->lt[selmon->sellt] = (Layout *)arg->v;
+		selmon->lt[selmon->sellt] =
+		    selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt] =
+		        (Layout *)arg->v;
 	/* TODO change layout symbol? */
 	arrange(selmon);
 	printstatus();
@@ -2129,7 +2164,7 @@ void setmfact(const Arg *arg) {
 	f = arg->f < 1.0 ? arg->f + selmon->mfact : arg->f - 1.0;
 	if (f < 0.1 || f > 0.9)
 		return;
-	selmon->mfact = f;
+	selmon->mfact = selmon->pertag->mfacts[selmon->pertag->curtag] = f;
 	arrange(selmon);
 }
 
@@ -2511,9 +2546,33 @@ void toggletag(const Arg *arg) {
 void toggleview(const Arg *arg) {
 	unsigned int newtagset =
 	    selmon ? selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK) : 0;
+	size_t i;
 
 	if (newtagset) {
 		selmon->tagset[selmon->seltags] = newtagset;
+
+		if (newtagset == ~0) {
+			selmon->pertag->prevtag = selmon->pertag->curtag;
+			selmon->pertag->curtag = 0;
+		}
+
+		/* test if the user did not select the same tag */
+		if (!(newtagset & 1 << (selmon->pertag->curtag - 1))) {
+			selmon->pertag->prevtag = selmon->pertag->curtag;
+			for (i = 0; !(newtagset & 1 << i); i++)
+				;
+			selmon->pertag->curtag = i + 1;
+		}
+
+		/* apply settings for this view */
+		selmon->nmaster = selmon->pertag->nmasters[selmon->pertag->curtag];
+		selmon->mfact = selmon->pertag->mfacts[selmon->pertag->curtag];
+		selmon->sellt = selmon->pertag->sellts[selmon->pertag->curtag];
+		selmon->lt[selmon->sellt] =
+		    selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt];
+		selmon->lt[selmon->sellt ^ 1] =
+		    selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt ^ 1];
+
 		focusclient(focustop(selmon), 1);
 		arrange(selmon);
 	}
@@ -2678,11 +2737,35 @@ void urgent(struct wl_listener *listener, void *data) {
 }
 
 void view(const Arg *arg) {
+	size_t i, tmptag;
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
 	selmon->seltags ^= 1; /* toggle sel tagset */
-	if (arg->ui & TAGMASK)
+	if (arg->ui & TAGMASK) {
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+		selmon->pertag->prevtag = selmon->pertag->curtag;
+
+		if (arg->ui == ~0)
+			selmon->pertag->curtag = 0;
+		else {
+			for (i = 0; !(arg->ui & 1 << i); i++)
+				;
+			selmon->pertag->curtag = i + 1;
+		}
+	} else {
+		tmptag = selmon->pertag->prevtag;
+		selmon->pertag->prevtag = selmon->pertag->curtag;
+		selmon->pertag->curtag = tmptag;
+	}
+
+	selmon->nmaster = selmon->pertag->nmasters[selmon->pertag->curtag];
+	selmon->mfact = selmon->pertag->mfacts[selmon->pertag->curtag];
+	selmon->sellt = selmon->pertag->sellts[selmon->pertag->curtag];
+	selmon->lt[selmon->sellt] =
+	    selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt];
+	selmon->lt[selmon->sellt ^ 1] =
+	    selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt ^ 1];
+
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 	printstatus();
